@@ -1,0 +1,171 @@
+X_train = pd.read_csv('X_train.csv', header=None).values
+Y_train = pd.read_csv('Y_train.csv', header=None).values
+X_train
+Y_train
+
+
+#scaling the values between 0 and 1 by dividing by the maximum array value
+X_train = X_train / np.max(X_train)  
+Y_train = Y_train / np.max(Y_train)  
+
+
+X_train = X_train.reshape(X_train.shape[0], X_train.shape[1], 1)
+Y_train = Y_train.reshape(Y_train.shape[0], Y_train.shape[1], 1) 
+#reshaping from 2d(1000,72) to 3d(1000,72,1) or something similar
+
+
+
+print("X_train shape:", X_train.shape)
+print("Y_train shape:", Y_train.shape) #printing the shapes of the input datasets 
+
+
+
+def build_fsrcnn(input_shape):                                                      #building function to build fsrcnn model
+    inputs = keras.Input(shape=input_shape)
+    x= layers.Conv1D(56 ,kernel_size =5, padding ='same')(inputs)
+    x = layers.PReLU()(x)#feature extraction layer
+    x= layers.Conv1D(12 ,kernel_size =1, padding ='same')(x)      #shrinking layer(decreased the no. of the output channels)
+    x = layers.PReLU()(x)
+    for i in range(4):
+        x= layers.Conv1D(12 ,kernel_size =3, padding ='same')(x)  #deep feature extraction
+        x = layers.PReLU()(x)
+    x= layers.Conv1D(56 ,kernel_size =1, padding ='same')(x)      #expansion layer
+    x = layers.PReLU()(x)
+    outputs= layers.Conv1D(1 ,kernel_size =5, padding ='same')(x)                   #reconstruction layer
+    model =keras.Model(inputs ,outputs, name="FSRCNN")
+    return model
+input_shape= (X_train.shape[1], 1)
+fsrcnn = build_fsrcnn(input_shape)
+fsrcnn.compile(optimizer="adam", loss="mse", metrics=["mae"])
+fsrcnn.summary()
+
+
+
+jet = fsrcnn.fit(X_train, Y_train, epochs=200, batch_size=32, validation_split=0.2)
+fsrcnn.save("fsrcnn_high_speed_rail.keras")
+plt.plot(jet.history['loss'], label='Train Loss')
+plt.plot(jet.history['val_loss'], label='Validation Loss')
+plt.xlabel("Epochs")
+plt.ylabel("Loss (MSE)")
+plt.legend()
+plt.show()
+
+
+
+import seaborn as sns
+fsrcnn = keras.models.load_model("fsrcnn_high_speed_rail.keras")
+
+X_test = X_train[:12] #subset of the training data
+Y_test = Y_train[:12]
+
+# Predict using FSRCNN nodel
+Y_pred = fsrcnn.predict(X_test)
+plt.figure(figsize=(12, 6))
+sns.set_style("darkgrid")  
+plt.plot(Y_test[0], label="True Channel", linewidth=3, color='green')
+plt.plot(Y_pred[0], label="FSRCNN Estimated Channel", linewidth=3, linestyle='dashed', color='orange')
+plt.xlabel("Subcarriers", fontsize=16, fontweight='bold')
+plt.ylabel("Channel Magnitude", fontsize=16, fontweight='bold')
+plt.title("Channel Estimation Comparison", fontsize=18, fontweight='bold')
+plt.legend(fontsize=14, loc='upper right')
+plt.grid(True, linestyle='-', alpha=0.9, linewidth=1.5)
+plt.show()
+
+
+def build_dncnn(input_shape):
+    inputs = keras.Input(shape=input_shape)
+    x= layers.Conv1D(64 ,kernel_size =3, padding ='same')(inputs)
+    x = layers.PReLU()(x)
+    for i in range(15):
+        x= layers.Conv1D(64 ,kernel_size =3, padding ='same',use_bias =False)(x)
+        x= layers.BatchNormalization()(x)
+        x= layers.ReLU()(x)
+    x= layers.Conv1D(1 ,kernel_size =3, padding ='same')(x)
+    output =layers.Subtract()([inputs, x])
+    model =keras.Model(inputs ,output, name="DNCNN")
+    return model
+input_shape= (Y_pred.shape[1], 1)
+dncnn = build_dncnn(input_shape)
+dncnn.compile(optimizer="adam", loss="mse", metrics=["mae"])
+dncnn.summary()
+
+
+Y_train_clean = pd.read_csv('Y_train.csv')
+
+
+noise_std = 0.05 
+noise = noise_std * np.random.randn(*Y_train_clean.shape)
+
+Y_train_noisy = Y_train_clean + noise
+np.save('Y_train_noisy.csv', Y_train_noisy)
+
+history = dncnn.fit(Y_train_noisy, Y_train_clean, epochs=200, batch_size=32, validation_split=0.2)
+dncnn.save("dncnn_ofdm_model.keras")
+
+
+Y_test_denoised = dncnn.predict(Y_pred)
+
+
+
+plt.figure(figsize=(12, 6))
+plt.plot(Y_test[0], label="True Channel", linewidth=2, color='green')
+plt.plot(Y_pred[0], label="FSRCNN Output", linewidth=2, linestyle='dashed', color='blue')
+plt.plot(Y_test_denoised[0], label="DnCNN Output", linewidth=2, linestyle='dotted', color='red')
+
+plt.xlabel("Subcarriers", fontsize=12, fontweight='bold')
+plt.ylabel("Channel Magnitude", fontsize=12, fontweight='bold')
+plt.title("FSRCNN + DnCNN Channel Estimation", fontsize=14, fontweight='bold')
+plt.legend(fontsize=12)
+plt.grid(True, linestyle='--', alpha=0.7)
+plt.show()
+
+
+
+import numpy as np
+
+def calculate_nmse(H_true, H_est):
+    error = np.linalg.norm(H_true - H_est) ** 2
+    norm = np.linalg.norm(H_true) ** 2
+    nmse = error / norm
+    return nmse
+
+
+# Print shapes before NMSE calculation
+print("Y_test shape:", Y_test.shape)  # Expected: (50, num_subcarriers, 1)
+print("Y_test_reconstructed shape:", Y_pred.shape)  # Should match Y_test
+print("Y_test_denoised shape:", Y_test_denoised.shape)  # Should also match Y_test
+
+
+
+# Ensure correct shape before NMSE computation
+Y_pred = np.reshape(Y_pred, Y_test.shape)
+Y_test_denoised = np.reshape(Y_test_denoised, Y_test.shape)
+
+# Now recompute NMSE
+nmse_ls = calculate_nmse(Y_test, X_test)
+nmse_fsrcnn = calculate_nmse(Y_test, Y_pred)
+nmse_fsrcnn_dncnn = calculate_nmse(Y_test, Y_test_denoised)
+
+# Print NMSE values
+print(f"NMSE (LS Estimation): {nmse_ls:.6f}")
+print(f"NMSE (FSRCNN): {nmse_fsrcnn:.6f}")
+print(f"NMSE (FSRCNN + DnCNN): {nmse_fsrcnn_dncnn:.6f}")
+
+import matplotlib.pyplot as plt
+
+nmse_values = [nmse_ls, nmse_fsrcnn, nmse_fsrcnn_dncnn]
+methods = ["LS", "FSRCNN", "FSRCNN + DnCNN"]
+
+
+plt.figure(figsize=(8, 5))
+plt.bar(methods, nmse_values, color=['red', 'blue', 'green'])
+plt.xlabel("Algorithm", fontsize=12, fontweight='bold')
+plt.ylabel("NMSE", fontsize=12, fontweight='bold')
+plt.title("NMSE Comparison of Different Channel Estimation Methods", fontsize=14, fontweight='bold')
+plt.grid(axis='y', linestyle='--', alpha=0.7)
+
+for i, nmse in enumerate(nmse_values):
+    plt.text(i, nmse + 0.001, f"{nmse:.4f}", ha='center', fontsize=12, fontweight='bold')
+
+plt.show()
+
